@@ -1,0 +1,56 @@
+name: Extract V4RR Keyboard
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Extract ZIP
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Tidak ada file .zip ditemukan di root repo!"
+            exit 1
+          fi
+
+          echo "Extracting: $ZIP_FILE"
+          mkdir -p extracted
+          unzip -o "$ZIP_FILE" -d extracted
+          rm -f "$ZIP_FILE"
+
+      - name: Move Project Files
+        run: |
+          shopt -s dotglob nullglob
+          ITEMS=(extracted/*)
+
+          if [ ${#ITEMS[@]} -eq 1 ] && [ -d "${ITEMS[0]}" ]; then
+            cp -a "${ITEMS[0]}"/. .
+          else
+            cp -a extracted/. .
+          fi
+
+          rm -rf extracted
+
+      - name: Commit Extracted Files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A -- . ':!.github/workflows/**'
+
+          if git diff --cached --quiet; then
+            echo "Tidak ada perubahan."
+          else
+            git commit -m "Extract V4RR Keyboard project"
+            git push
+          fi
