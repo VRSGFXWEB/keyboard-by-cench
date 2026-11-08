@@ -13,6 +13,9 @@ object Prefs {
     fun bool(c: Context, k: String, d: Boolean) = sp(c).getBoolean(k, d)
     fun setBool(c: Context, k: String, v: Boolean) = sp(c).edit().putBoolean(k, v).apply()
 
+    fun float(c: Context, k: String, d: Float) = sp(c).getFloat(k, d)
+    fun setFloat(c: Context, k: String, v: Float) = sp(c).edit().putFloat(k, v).apply()
+
     fun recents(c: Context): List<String> =
         (sp(c).getString("recent", "") ?: "").split(" ").filter { it.isNotEmpty() }
 

@@ -1,11 +1,11 @@
 # V4RR Keyboard
-Keyboard Android gaya iOS (QWERTY, angka/simbol, panel emoji, mode terang/gelap, halaman setting).
+Keyboard Android gaya iOS: QWERTY, angka/simbol, panel emoji + cari emoji, mic (input suara),
+terang/gelap, blur, ukuran bisa diubah (tahan spasi "V4RR"), kata saran.
 
-## Build tanpa PC (lewat HP)
-1. Taruh `NotoColorEmoji.ttf` (dari zip iOS 26.4 Emoji, `system/fonts/`) ke `app/src/main/assets/fonts/`
-2. Upload semua isi folder ini ke repo GitHub baru (branch `main`)
-3. Tab **Actions** → *Build V4RR Keyboard APK* → tunggu ±3 menit → download artifact `V4RR-Keyboard-apk`
-4. Extract, install `app-debug.apk`, buka app, ikuti langkah 1 & 2.
+## Build (tanpa PC)
+1. Upload isi folder ini ke repo GitHub (branch main).
+2. Actions -> "Build V4RR Keyboard APK" -> Run workflow -> download artifact -> install APK.
 
-## Build di PC
-Android Studio → Open folder ini → Build > Build APK(s).
+## Font emoji iOS
+Gak perlu ditaruh di repo. Buka app V4RR Keyboard -> kartu "FONT EMOJI iOS" -> "Pilih file font / zip"
+-> pilih NotoColorEmoji.ttf atau zip module Magisk langsung dari HP.
