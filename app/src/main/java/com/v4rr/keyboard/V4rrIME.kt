@@ -2,6 +2,11 @@ package com.v4rr.keyboard
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Path
+import android.view.inputmethod.InputConnection
 import android.content.res.Configuration
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -25,11 +30,6 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
-import android.view.textservice.SentenceSuggestionsInfo
-import android.view.textservice.SpellCheckerSession
-import android.view.textservice.SuggestionsInfo
-import android.view.textservice.TextInfo
-import android.view.textservice.TextServicesManager
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -51,23 +51,66 @@ class V4rrIME : InputMethodService() {
 
     private class KeyCell(val cell: FrameLayout, val label: TextView?, val icon: ImageView?, val bg: GradientDrawable)
 
-    /** Balon preview huruf (kayak iOS) */
+    /** Balon preview huruf (kayak iOS): badan lebar + leher yang nyambung ke tombol. */
     private class PreviewView(c: Context) : View(c) {
-        var text = ""; var keyW = 0; var keyH = 0
+        var text = ""; var keyW = 0; var keyH = 0; var keyX = 0
         var fill = 0xFF636366.toInt(); var txt = 0xFFFFFFFF.toInt()
+        var face: Typeface? = null
         private val p = Paint(Paint.ANTI_ALIAS_FLAG)
         private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+        private val path = Path()
         override fun onDraw(c: Canvas) {
             val w = width.toFloat(); val h = height.toFloat()
-            val r = keyH * 0.24f
-            val bodyH = keyH * 1.35f
+            val r = keyH * 0.30f
+            val rk = keyH * 0.22f
+            val bodyH = keyH * 1.30f
+            val nl = keyX.toFloat()
+            val nr = keyX + keyW.toFloat()
+            val y1 = bodyH - r
+            val y2 = bodyH + r * 0.9f
+            path.reset()
+            path.moveTo(r, 0f)
+            path.lineTo(w - r, 0f)
+            path.quadTo(w, 0f, w, r)
+            path.lineTo(w, y1)
+            path.cubicTo(w, y1 + r * 1.2f, nr, y2 - r * 0.9f, nr, y2)
+            path.lineTo(nr, h - rk)
+            path.quadTo(nr, h, nr - rk, h)
+            path.lineTo(nl + rk, h)
+            path.quadTo(nl, h, nl, h - rk)
+            path.lineTo(nl, y2)
+            path.cubicTo(nl, y2 - r * 0.9f, 0f, y1 + r * 1.2f, 0f, y1)
+            path.lineTo(0f, r)
+            path.quadTo(0f, 0f, r, 0f)
+            path.close()
+            p.style = Paint.Style.FILL
             p.color = fill
-            c.drawRoundRect(RectF(0f, 0f, w, bodyH), r, r, p)
-            c.drawRoundRect(RectF((w - keyW) / 2f, bodyH * 0.6f, (w + keyW) / 2f, h), r, r, p)
+            c.drawPath(path, p)
             tp.color = txt
+            tp.typeface = face ?: Typeface.DEFAULT
             tp.textSize = keyH * 0.78f
             val fm = tp.fontMetrics
             c.drawText(text, w / 2f, bodyH / 2f - (fm.ascent + fm.descent) / 2f, tp)
+        }
+    }
+
+    /** Background foto keyboard (center-crop, pojok atas membulat, bisa di-dim). */
+    private class BgView(c: Context, val bmp: Bitmap, val dim: Int, val radius: Float) : View(c) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val clip = Path()
+        override fun onDraw(c: Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            if (w <= 0f || h <= 0f) return
+            clip.reset()
+            clip.addRoundRect(RectF(0f, 0f, w, h), floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f), Path.Direction.CW)
+            c.save()
+            c.clipPath(clip)
+            val sc = maxOf(w / bmp.width, h / bmp.height)
+            val sw = bmp.width * sc; val sh = bmp.height * sc
+            val l = (w - sw) / 2f; val t = (h - sh) / 2f
+            c.drawBitmap(bmp, null, RectF(l, t, l + sw, t + sh), p)
+            if (dim > 0) c.drawColor((dim * 255 / 100) shl 24)
+            c.restore()
         }
     }
 
@@ -113,13 +156,15 @@ class V4rrIME : InputMethodService() {
         return fontCache
     }
 
-    // ---- kata saran
-    private val learn = HashMap<String, Int>()
-    private val bigram = HashMap<String, HashMap<String, Int>>()
-    private var learnDirty = 0
-    private val words: List<String> by lazy {
-        try { assets.open("words.txt").bufferedReader().readLines().filter { it.isNotBlank() } } catch (e: Exception) { emptyList() }
+    private var textFontCache: Typeface? = null
+    private var textFontStamp = -1L
+    private fun textFace(): Typeface? {
+        if (!Prefs.bool(this, "tfont", true)) return null
+        val st = FontStore.stamp(this, FontStore.KIND_TEXT)
+        if (st != textFontStamp) { textFontStamp = st; textFontCache = FontStore.load(this, FontStore.KIND_TEXT) }
+        return textFontCache
     }
+
     private val emojiIndex: List<Pair<String, List<String>>> by lazy {
         try {
             assets.open("emoji_keywords.txt").bufferedReader().readLines().mapNotNull { l ->
@@ -128,24 +173,30 @@ class V4rrIME : InputMethodService() {
             }
         } catch (e: Exception) { emptyList() }
     }
-    private var spell: SpellCheckerSession? = null
-    private var spellFor = ""
-    private var spellRes: List<String> = emptyList()
-    private var spellAsked = ""
-    private val spellListener = object : SpellCheckerSession.SpellCheckerSessionListener {
-        override fun onGetSuggestions(results: Array<out SuggestionsInfo>?) {}
-        override fun onGetSentenceSuggestions(results: Array<out SentenceSuggestionsInfo>?) {
-            val r = results?.firstOrNull() ?: return
-            val out = ArrayList<String>()
-            if (r.suggestionsCount > 0) {
-                val info = r.getSuggestionsInfoAt(0)
-                for (i in 0 until info.suggestionsCount) out.add(info.getSuggestionAt(i))
-            }
-            handler.post {
-                spellFor = spellAsked
-                spellRes = out
-                if (spellAsked == currentWord().lowercase()) updateSuggestions(false)
-            }
+
+    // ---- kata saran (mesin: SuggestEngine, 100% lokal)
+    private lateinit var engine: SuggestEngine
+    private var learnEpoch = 0
+    private var undoOrig: String? = null
+    private var suppressWord = ""
+    private var undoNew: String? = null
+    private var tsc = 1f       // skala ukuran huruf tombol
+    private var keyGap = 3     // dp
+    private var keyRad = 10    // dp
+    private var keyAlpha = 100
+    private lateinit var suggestScroll: HorizontalScrollView
+    private var bgBitmap: Bitmap? = null
+    private var bgStamp = -1L
+    private var bgBlurSig = -1
+
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        handler.removeCallbacks(rebuildRun)
+        handler.postDelayed(rebuildRun, 150)
+    }
+    private val rebuildRun = Runnable {
+        if (host != null && resizeOv == null && builtSig != sig()) {
+            setInputView(build())
+            applyWindowStyle()
         }
     }
 
@@ -153,18 +204,22 @@ class V4rrIME : InputMethodService() {
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private fun rowH() = (dp(50) * hs).toInt()
-    private fun sig() = "${Prefs.theme(this)}|${Themes.isDark(this)}|${Prefs.bool(this, "font", true)}|${FontStore.stamp(this)}|${Prefs.bool(this, "blur", true)}"
+    private fun sig() = "${Themes.isDark(this)}|${FontStore.stamp(this, FontStore.KIND_EMOJI)}|${FontStore.stamp(this, FontStore.KIND_TEXT)}|${BgStore.stamp(this)}|${Prefs.sigString(this)}"
 
     // ------------------------------------------------------------ lifecycle
     override fun onCreate() {
         super.onCreate()
         instance = this
+        val lines = { f: String -> try { assets.open(f).bufferedReader().readLines() } catch (e: Exception) { emptyList<String>() } }
+        engine = SuggestEngine(lines("words.txt"), lines("bigrams.txt"))
+        learnEpoch = Prefs.int(this, "learn_epoch", 0)
         loadLearn()
+        Prefs.registerListener(this, prefListener)
     }
 
     override fun onDestroy() {
         saveLearn()
-        try { spell?.close() } catch (e: Exception) {}
+        Prefs.unregisterListener(this, prefListener)
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -180,6 +235,9 @@ class V4rrIME : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        val ep = Prefs.int(this, "learn_epoch", 0)
+        if (ep != learnEpoch) { engine.clearLearn(); learnEpoch = ep }
+        undoNew = null; undoOrig = null
         if (host != null && builtSig != sig()) setInputView(build())
         val ty = info?.inputType ?: 0
         val cls = ty and InputType.TYPE_MASK_CLASS
@@ -213,7 +271,12 @@ class V4rrIME : InputMethodService() {
 
     // ------------------------------------------------------------ build
     private fun build(): View {
-        pal = Themes.palette(this)
+        pal = Themes.keyboardPalette(this)
+        tsc = Prefs.int(this, "kb_text", 100).coerceIn(70, 150) / 100f
+        keyGap = Prefs.int(this, "kb_gap", 3).coerceIn(0, 10)
+        keyRad = Prefs.int(this, "kb_rad", 10).coerceIn(0, 24)
+        keyAlpha = Prefs.int(this, "key_alpha", 100).coerceIn(20, 100)
+        engine.setShortcuts(Prefs.str(this, "shortcuts", ""))
         hs = Prefs.float(this, "kb_h", 1f).coerceIn(0.7f, 1.45f)
         wf = Prefs.float(this, "kb_w", 1f).coerceIn(0.6f, 1f)
         xf = Prefs.float(this, "kb_x", 0f).coerceIn(0f, 1f - wf)
@@ -225,9 +288,17 @@ class V4rrIME : InputMethodService() {
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(0, 0, 0, dp(6))
         suggestBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        suggestScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isFillViewport = true
+            addView(suggestBar, FrameLayout.LayoutParams(WRAP, MATCH))
+        }
         body = FrameLayout(this)
-        col.addView(suggestBar, LinearLayout.LayoutParams(MATCH, dp(42)))
+        col.addView(suggestScroll, LinearLayout.LayoutParams(MATCH, dp(42)))
         col.addView(body, LinearLayout.LayoutParams(MATCH, WRAP))
+        val bmp = loadBg()
+        if (bmp != null) frame.addView(BgView(this, bmp, Prefs.int(this, "bg_dim", 25), dp(22).toFloat()), FrameLayout.LayoutParams(MATCH, MATCH))
         frame.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
         h.addView(frame)
         host = h
@@ -245,27 +316,65 @@ class V4rrIME : InputMethodService() {
         frame.layoutParams = lp
     }
 
-    /** Background jendela keyboard: transparan + blur bawaan sistem (Android 12+), ringan karena diproses compositor. */
+    private fun loadBg(): Bitmap? {
+        if (Prefs.bgMode(this) != 2) return null
+        val st = BgStore.stamp(this)
+        val bl = Prefs.int(this, "bg_blur", 0)
+        if (st != bgStamp || bl != bgBlurSig || bgBitmap == null) {
+            bgStamp = st; bgBlurSig = bl
+            bgBitmap = try {
+                val f = BgStore.file(this)
+                if (!f.exists()) null else {
+                    val b = BitmapFactory.decodeFile(f.absolutePath)
+                    if (b == null) null else BgStore.blurred(b, bl)
+                }
+            } catch (e: Throwable) { null }
+        }
+        return bgBitmap
+    }
+
+    /** Background jendela keyboard: transparan + blur bawaan sistem (Android 12+), diproses compositor. */
     private fun applyWindowStyle() {
         val w = window?.window ?: return
+        val c = dp(22).toFloat()
+        val d = GradientDrawable()
+        d.cornerRadii = floatArrayOf(c, c, c, c, 0f, 0f, 0f, 0f)
+        if (Prefs.bgMode(this) == 2 && loadBg() != null) {
+            // foto digambar sendiri oleh BgView
+            d.setColor(0)
+            w.setBackgroundDrawable(d)
+            setBlur(w, 0)
+            return
+        }
         var blur = false
         if (Build.VERSION.SDK_INT >= 31 && Prefs.bool(this, "blur", true)) {
             blur = try { getSystemService(WindowManager::class.java)?.isCrossWindowBlurEnabled == true } catch (e: Exception) { false }
         }
-        val a = if (blur) 0xB0 else 0xF2
-        val c = dp(22).toFloat()
-        val d = GradientDrawable()
+        val a = if (blur) (Prefs.int(this, "bg_alpha", 70) * 255 / 100).coerceIn(40, 255) else 0xF2
         d.setColor((pal.bg and 0x00FFFFFF) or (a shl 24))
-        d.cornerRadii = floatArrayOf(c, c, c, c, 0f, 0f, 0f, 0f)
         w.setBackgroundDrawable(d)
-        if (Build.VERSION.SDK_INT >= 31) {
-            try { w.setBackgroundBlurRadius(if (blur) dp(30) else 0) } catch (e: Exception) {}
-        }
+        setBlur(w, if (blur) dp(Prefs.int(this, "blur_radius", 40)) else 0)
+    }
+
+    private fun setBlur(w: android.view.Window, radius: Int) {
+        if (Build.VERSION.SDK_INT < 31) return
+        try { w.setBackgroundBlurRadius(radius) } catch (e: Throwable) {}
+        try {
+            val lp = w.attributes
+            if (radius > 0) {
+                lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+                lp.blurBehindRadius = radius
+            } else {
+                lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+                lp.blurBehindRadius = 0
+            }
+            w.attributes = lp
+        } catch (e: Throwable) {}
     }
 
     private fun renderAll() {
         if (host == null) return
-        suggestBar.visibility = if (emojiMode) View.GONE else View.VISIBLE
+        suggestScroll.visibility = if (emojiMode) View.GONE else View.VISIBLE
         when {
             emojiMode && searchMode -> renderSearch()
             emojiMode -> renderEmoji()
@@ -292,15 +401,20 @@ class V4rrIME : InputMethodService() {
         val hst = host ?: return
         try {
             val kw = v.width; val kh = v.height
-            val pw = (kw * 1.5f).toInt(); val ph = (kh * 2.3f).toInt()
+            val pw = (kw * 1.55f).toInt(); val ph = (kh * 2.35f).toInt()
             val pv = previewView ?: PreviewView(this).also { previewView = it }
             pv.fill = if (pal.dark) 0xFF636366.toInt() else 0xFFFFFFFF.toInt()
-            pv.txt = pal.text; pv.text = text; pv.keyW = kw; pv.keyH = kh
-            pv.invalidate()
+            pv.txt = if (pal.dark) 0xFFFFFFFF.toInt() else 0xFF000000.toInt()
+            pv.face = textFace()
+            pv.text = text; pv.keyW = kw; pv.keyH = kh
+            // koordinat popup itu relatif ke JENDELA keyboard (bukan layar), jadi pakai getLocationInWindow
             val loc = IntArray(2)
-            v.getLocationOnScreen(loc)
-            val x = (loc[0] + kw / 2 - pw / 2).coerceIn(0, maxOf(0, resources.displayMetrics.widthPixels - pw))
+            v.getLocationInWindow(loc)
+            val winW = maxOf(hst.rootView.width, resources.displayMetrics.widthPixels)
+            val x = (loc[0] + kw / 2 - pw / 2).coerceIn(0, maxOf(0, winW - pw))
             val y = loc[1] + kh - ph
+            pv.keyX = loc[0] - x
+            pv.invalidate()
             val pop = previewPop ?: PopupWindow(pv, pw, ph).apply {
                 isTouchable = false; isFocusable = false; isClippingEnabled = false
                 setBackgroundDrawable(null)
@@ -349,6 +463,13 @@ class V4rrIME : InputMethodService() {
         return r
     }
 
+    /** terapkan transparansi tombol ke warna */
+    private fun ca(col: Int): Int {
+        if (keyAlpha >= 100) return col
+        val al = ((col ushr 24) and 0xFF) * keyAlpha / 100
+        return (col and 0x00FFFFFF) or (al shl 24)
+    }
+
     private fun key(
         row: LinearLayout, weight: Float, label: String? = null, icon: Int = 0,
         special: Boolean = false, size: Float = 24f, repeat: Boolean = false,
@@ -357,10 +478,10 @@ class V4rrIME : InputMethodService() {
     ): KeyCell {
         val cell = FrameLayout(this)
         val base = colorOverride ?: if (special) pal.special else pal.key
-        val normal: () -> Int = normalFn ?: { base }
-        val pressedC = colorOverride ?: if (special) pal.key else pal.special
+        val normal: () -> Int = if (colorOverride != null) { { base } } else { { ca(normalFn?.invoke() ?: base) } }
+        val pressedC = colorOverride ?: ca(if (special) pal.key else pal.special)
         val bg = GradientDrawable()
-        bg.cornerRadius = dp(10).toFloat()
+        bg.cornerRadius = dp(keyRad).toFloat()
         bg.setColor(normal())
         cell.background = bg
         val fg = if (colorOverride != null) 0xFFFFFFFF.toInt() else pal.text
@@ -371,14 +492,15 @@ class V4rrIME : InputMethodService() {
             tv.text = label
             tv.gravity = Gravity.CENTER
             tv.setTextColor(fg)
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, size)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, size * tsc)
+            textFace()?.let { tv.typeface = it }
             cell.addView(tv, FrameLayout.LayoutParams(MATCH, MATCH))
         } else if (icon != 0) {
             iv = iconView(icon, fg)
             cell.addView(iv, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER))
         }
         val lp = LinearLayout.LayoutParams(0, MATCH, weight)
-        lp.setMargins(dp(3), dp(4), dp(3), dp(4))
+        lp.setMargins(dp(keyGap), dp(keyGap + 1), dp(keyGap), dp(keyGap + 1))
         row.addView(cell, lp)
         attach(cell, bg, normal, pressedC, repeat, preview, onLong, onTap)
         return KeyCell(cell, tv, iv, bg)
@@ -426,7 +548,7 @@ class V4rrIME : InputMethodService() {
                 charRow(col, "-/:;()\$&@\"", 0f)
                 val r = newRow(col)
                 key(r, 1.5f, "#+=", special = true, size = 16f) { layer = 2; renderAll() }
-                for (c in ".,?!'") key(r, 1.4f, c.toString()) { typeChar(c.toString()) }
+                for (c in ".,?!'") key(r, 1.4f, c.toString(), preview = { c.toString() }) { typeChar(c.toString()) }
                 backKey(r, 1.5f)
             }
             else -> {
@@ -434,7 +556,7 @@ class V4rrIME : InputMethodService() {
                 charRow(col, "_\\|~<>€£¥•", 0f)
                 val r = newRow(col)
                 key(r, 1.5f, "123", special = true, size = 16f) { layer = 1; renderAll() }
-                for (c in ".,?!'") key(r, 1.4f, c.toString()) { typeChar(c.toString()) }
+                for (c in ".,?!'") key(r, 1.4f, c.toString(), preview = { c.toString() }) { typeChar(c.toString()) }
                 backKey(r, 1.5f)
             }
         }
@@ -682,6 +804,7 @@ class V4rrIME : InputMethodService() {
     // ------------------------------------------------------------ ubah ukuran
     private fun saveSize() {
         Prefs.setFloat(this, "kb_h", hs); Prefs.setFloat(this, "kb_w", wf); Prefs.setFloat(this, "kb_x", xf)
+        builtSig = sig()
     }
 
     private fun exitResize() {
@@ -808,7 +931,7 @@ class V4rrIME : InputMethodService() {
             val s = t.tag as? String ?: continue
             t.text = if (shift > 0) s.uppercase() else s
         }
-        shiftKey?.let { it.bg.setColor(if (shift > 0) pal.key else pal.special); it.icon?.setImageResource(shiftIcon()) }
+        shiftKey?.let { it.bg.setColor(ca(if (shift > 0) pal.key else pal.special)); it.icon?.setImageResource(shiftIcon()) }
     }
 
     private fun autoShift() {
@@ -827,14 +950,33 @@ class V4rrIME : InputMethodService() {
         val ic = currentInputConnection ?: return
         ic.commitText(s, 1)
         lastSpace = 0
+        undoNew = null
         if (layer == 0) autoShift()
         updateSuggestions()
+        // dari angka/simbol: setelah ketik simbol (bukan angka) otomatis balik ke huruf
+        if (layer != 0 && Prefs.bool(this, "autoabc", true) && !s[0].isDigit()) { layer = 0; renderAll() }
     }
 
     private fun backspace() {
         if (searchMode) {
             if (searchQuery.isNotEmpty()) searchQuery = searchQuery.dropLast(1)
             updateSearch(); return
+        }
+        val un = undoNew
+        val uo = undoOrig
+        undoNew = null; undoOrig = null
+        if (un != null && uo != null) {
+            val ic = currentInputConnection
+            val before = ic?.getTextBeforeCursor(un.length + 1, 0)?.toString()
+            if (ic != null && before == "$un ") {
+                // batalin koreksi otomatis: balik ke kata asli
+                ic.deleteSurroundingText(un.length + 1, 0)
+                ic.commitText(uo, 1)
+                engine.reject(uo)
+                suppressWord = uo.lowercase()
+                autoShift(); updateSuggestions()
+                return
+            }
         }
         sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
         if (!emojiMode) { autoShift(); updateSuggestions() }
@@ -853,11 +995,14 @@ class V4rrIME : InputMethodService() {
                 lastSpace = now; autoShift(); updateSuggestions(); return
             }
         }
+        undoNew = null; undoOrig = null
+        if (Prefs.bool(this, "autocorrect", true) && !noLearn && layer == 0 && !emojiMode) tryAutoCorrect(ic)
         ic.commitText(" ", 1)
         lastSpace = now
         learnWord()
         autoShift()
         updateSuggestions()
+        if (layer != 0 && Prefs.bool(this, "autoabc", true)) { layer = 0; renderAll() }
     }
 
     private fun actionId(): Int {
@@ -877,6 +1022,7 @@ class V4rrIME : InputMethodService() {
     }
 
     private fun enter() {
+        undoNew = null
         val a = actionId()
         if (a != 0) currentInputConnection?.performEditorAction(a)
         else sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
@@ -885,7 +1031,8 @@ class V4rrIME : InputMethodService() {
     }
 
     // ------------------------------------------------------------ kata saran
-    // Catatan: saran HANYA muncul di bar, TIDAK pernah mengganti kata otomatis. Ganti kata cuma kalau lu tap sarannya.
+    // Saran muncul di bar (bisa digeser). Koreksi otomatis cuma terjadi pas tekan spasi, dan bisa dibatalin
+    // dengan backspace langsung setelahnya.
     private fun currentWord(): String {
         val b = currentInputConnection?.getTextBeforeCursor(30, 0)?.toString() ?: ""
         return b.takeLastWhile { it.isLetter() || it == '\'' }
@@ -893,38 +1040,44 @@ class V4rrIME : InputMethodService() {
 
     private fun prevWord(): String {
         val t = currentInputConnection?.getTextBeforeCursor(60, 0)?.toString() ?: return ""
-        return t.lowercase().split(Regex("[^\\p{L}']+")).lastOrNull { it.isNotEmpty() } ?: ""
+        val ws = t.lowercase().split(Regex("[^\\p{L}']+")).filter { it.isNotEmpty() }
+        // kalau lagi ngetik kata, kata sebelumnya = yang kedua dari belakang; kalau habis spasi = yang terakhir
+        return if (currentWord().isNotEmpty()) ws.getOrNull(ws.size - 2) ?: "" else ws.lastOrNull() ?: ""
     }
 
-    private fun ensureSpell() {
-        if (spell != null) return
-        try {
-            val tsm = getSystemService(Context.TEXT_SERVICES_MANAGER_SERVICE) as TextServicesManager
-            spell = tsm.newSpellCheckerSession(null, null, spellListener, true)
-        } catch (e: Exception) { spell = null }
-    }
-
-    private fun candidates(w: String): List<String> {
-        if (w.isEmpty()) {
-            val nxt = bigram[prevWord()]?.entries?.sortedByDescending { it.value }?.map { it.key }?.take(3) ?: emptyList()
-            return (nxt + listOf("aku", "yang", "i")).distinct().take(3)
+    private fun tryAutoCorrect(ic: InputConnection) {
+        val w = currentWord()
+        if (w.length < 2 || w.lowercase() == suppressWord) return
+        val before = ic.getTextBeforeCursor(w.length + 40, 0)?.toString() ?: return
+        val head = before.dropLast(w.length)
+        val pc = head.lastOrNull()
+        // jangan sentuh email, hashtag, mention, url, atau kata nempel angka
+        if (pc != null && (pc == '@' || pc == '#' || pc == '/' || pc.isDigit())) return
+        if (pc == '.' && head.length >= 2 && head[head.length - 2].isLetter()) return
+        if (w.drop(1).any { it.isUpperCase() }) return
+        if (w[0].isUpperCase()) {
+            // huruf kapital di tengah kalimat = nama orang/tempat, jangan dikoreksi
+            val t = head.trimEnd(' ')
+            val sentenceStart = t.isEmpty() || t.last() == '.' || t.last() == '!' || t.last() == '?' || t.last() == '\n'
+            if (!sentenceStart) return
         }
-        val lw = w.lowercase()
-        val comp = (learn.entries.filter { it.key.startsWith(lw) && it.key != lw }
-            .sortedByDescending { it.value }.map { it.key } +
-                words.filter { it.startsWith(lw) && it != lw }).distinct()
-        val sp = if (spellFor == lw) spellRes else emptyList()
-        val rest = (comp.take(2) + sp).filter { it.lowercase() != lw }.distinct().take(2)
-        return listOf(w) + rest
+        val fix = engine.autoFix(w) ?: return
+        if (fix == w) return
+        ic.deleteSurroundingText(w.length, 0)
+        ic.commitText(fix, 1)
+        undoOrig = w
+        undoNew = fix
     }
 
-    private fun updateSuggestions(request: Boolean = true) {
+    private fun updateSuggestions() {
         if (host == null || emojiMode) return
         suggestBar.removeAllViews()
+        suggestScroll.scrollTo(0, 0)
         if (noLearn || !Prefs.bool(this, "suggest", true)) return
         val w = currentWord()
-        val items = candidates(w)
-        items.forEachIndexed { i, s ->
+        val res = engine.suggest(w, prevWord())
+        val minW = (resources.displayMetrics.widthPixels * wf / 3f).toInt()
+        res.list.forEachIndexed { i, s ->
             if (i > 0) {
                 val d = View(this)
                 d.setBackgroundColor(pal.sel)
@@ -936,15 +1089,14 @@ class V4rrIME : InputMethodService() {
             tv.text = s
             tv.gravity = Gravity.CENTER
             tv.maxLines = 1
+            tv.minWidth = minW
+            tv.setPadding(dp(12), 0, dp(12), 0)
             tv.setTextColor(if (w.isEmpty()) pal.hint else pal.text)
             tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            val isAuto = res.auto != null && s == res.auto
+            tv.typeface = if (isAuto) Typeface.DEFAULT_BOLD else (textFace() ?: Typeface.DEFAULT)
             tv.setOnClickListener { pick(s) }
-            suggestBar.addView(tv, LinearLayout.LayoutParams(0, MATCH, 1f))
-        }
-        if (request && w.length >= 2) {
-            ensureSpell()
-            spellAsked = w.lowercase()
-            try { spell?.getSentenceSuggestions(arrayOf(TextInfo(w)), 3) } catch (e: Exception) {}
+            suggestBar.addView(tv, LinearLayout.LayoutParams(WRAP, MATCH))
         }
     }
 
@@ -954,6 +1106,7 @@ class V4rrIME : InputMethodService() {
         if (w.isNotEmpty()) ic.deleteSurroundingText(w.length, 0)
         val out = if (w.isNotEmpty() && w[0].isUpperCase()) s.replaceFirstChar { it.uppercase() } else s
         ic.commitText("$out ", 1)
+        undoNew = null; undoOrig = null
         learnWord()
         autoShift()
         updateSuggestions()
@@ -963,33 +1116,24 @@ class V4rrIME : InputMethodService() {
     private fun learnWord() {
         if (noLearn || !Prefs.bool(this, "suggest", true)) return
         val t = currentInputConnection?.getTextBeforeCursor(80, 0)?.toString() ?: return
-        val ws = t.lowercase().split(Regex("[^\\p{L}']+")).filter { it.isNotEmpty() }
-        val last = ws.lastOrNull() ?: return
-        if (last.length < 2 || last.length > 20) return
-        learn[last] = (learn[last] ?: 0) + 1
-        if (ws.size >= 2) {
-            val m = bigram.getOrPut(ws[ws.size - 2]) { HashMap() }
-            m[last] = (m[last] ?: 0) + 1
-        }
-        if (learn.size > 3000) learn.entries.removeAll { it.value <= 1 }
-        if (++learnDirty >= 15) saveLearn()
+        engine.learnFrom(t)
+        if (engine.dirty >= 15) saveLearn()
     }
 
     private fun loadLearn() {
         try {
-            val s = getSharedPreferences("v4rr_learn", MODE_PRIVATE).getString("w", "") ?: ""
-            for (p in s.split(" ")) {
-                val i = p.lastIndexOf('=')
-                if (i > 0) learn[p.substring(0, i)] = p.substring(i + 1).toIntOrNull() ?: 1
-            }
+            val sp = getSharedPreferences("v4rr_learn", MODE_PRIVATE)
+            engine.importLearn(sp.getString("w", "") ?: "", sp.getString("b", "") ?: "")
         } catch (e: Exception) {}
     }
 
     private fun saveLearn() {
-        learnDirty = 0
+        engine.dirty = 0
+        if (Prefs.int(this, "learn_epoch", 0) != learnEpoch) return
         try {
             getSharedPreferences("v4rr_learn", MODE_PRIVATE).edit()
-                .putString("w", learn.entries.joinToString(" ") { "${it.key}=${it.value}" }).apply()
+                .putString("w", engine.exportWords())
+                .putString("b", engine.exportBigrams()).apply()
         } catch (e: Exception) {}
     }
 }

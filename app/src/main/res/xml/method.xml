@@ -3,6 +3,6 @@
     android:settingsActivity="com.v4rr.keyboard.MainActivity">
     <subtype
         android:label="V4RR"
-        android:imeSubtypeLocale="en_US"
+        android:imeSubtypeLocale="id_ID"
         android:imeSubtypeMode="keyboard" />
 </input-method>
